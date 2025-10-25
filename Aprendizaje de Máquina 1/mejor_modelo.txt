@@ -1,0 +1,7 @@
+Mejor modelo: SVM
+Accuracy: 0.960
+Balanced Accuracy: 0.957
+
+Mejores hiperparámetros:
+  - model__kernel: rbf
+  - model__C: 1

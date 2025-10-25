@@ -15,16 +15,22 @@ Requisitos:
     pip install pandas numpy scikit-learn imbalanced-learn xgboost joblib prefect openpyxl
     ajustar N_ITER, CV_FOLDS, N_JOBS según recursos
 """
-
 import os
 import warnings
 warnings.filterwarnings("ignore")
 
+# Fuerza backend no interactivo para evitar NSWindow en macOS/hilos
+import matplotlib
+matplotlib.use("Agg")  # <- clave
+
+# ahora sí importa pyplot
+import matplotlib.pyplot as plt
+
 # -------------------------
 # PARÁMETROS GLOBALES
 # -------------------------
-INPUT_PATH = "C:\\Users\\ef1009la\\Analitica\\Aprendizaje de Máquina 1\\data_academic_performance.xlsx"   # ajustar la ruta
-OUTPUT_DIR = "C:\\Users\\ef1009la\\Analitica\\Aprendizaje de Máquina 1"                                   # directorio para guardar modelos/plots/imágenes
+INPUT_PATH = "//Users/sebastiangomba/Documents/Universidad/Machine Learning I/Proyecto/Dataset/data_academic_performance.xlsx"
+OUTPUT_DIR = "//Users/sebastiangomba/Documents/Universidad/Machine Learning I/Proyecto/Resultados"     # directorio para guardar modelos/plots/imágenes
 N_ITER = 2
 CV_FOLDS = 3
 N_JOBS = -1
@@ -38,7 +44,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # -------------------------
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from joblib import dump
 from prefect import flow, task
 
@@ -61,34 +66,29 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 if USE_XGBOOST:
     from xgboost import XGBClassifier, XGBRegressor
 
-
 # ============================================================
 # TAREAS PREFECT
 # ============================================================
 
 @task
 def load_data(path):
-    """Carga los datos desde el archivo Excel."""
     print("Cargando datos...")
     df = pd.read_excel(path)
     print("Shape:", df.shape)
     return df
 
+
 @task
 def preprocess_data(df):
-    """Prepara las columnas de entrada y define el preprocesador."""
     print("Preparando features y columnas...")
 
-    # Detección automática de columna objetivo para clasificación
     quartile_col = next((c for c in df.columns if "quart" in c.lower()), None)
     if not quartile_col:
         raise ValueError("No se encontró columna 'quartile' en el dataset.")
 
-    # Cálculo de la variable total_score
     score_cols = ['MAT_S11', 'CR_S11', 'CC_S11', 'BIO_S11', 'ENG_S11']
     df['total_score'] = df[score_cols].sum(axis=1)
 
-    # Exclusión de columnas no predictoras
     exclude = [quartile_col, 'total_score']
     for c in df.columns:
         if str(c).lower() in ['id', 'index']:
@@ -100,7 +100,6 @@ def preprocess_data(df):
 
     df[cat_features] = df[cat_features].astype(str)
 
-    # Definición del preprocesador
     numeric_transformer = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler())
@@ -116,50 +115,37 @@ def preprocess_data(df):
 
     return df, feature_cols, quartile_col, preprocessor
 
+
 @task
 def train_classification(df, feature_cols, quartile_col, preprocessor):
-    """Entrena y evalúa los modelos de clasificación."""
     print("\nEntrenando modelos de clasificación...")
 
     X = df[feature_cols]
     y = df[quartile_col]
 
-    # Ajuste de clases y codificación
     if y.min() > 0:
         y = y - y.min()
     if y.dtype == object:
         le = LabelEncoder()
         y = le.fit_transform(y)
 
-    # División de datos
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE
     )
 
-    # Modelos base
     classifiers = {
         "KNN": KNeighborsClassifier(),
         "SVM": SVC(probability=True),
         "Logistic": LogisticRegression(max_iter=1000),
         "RandomForest": RandomForestClassifier(random_state=RANDOM_STATE)
     }
-    if USE_XGBOOST:
-        classifiers["XGBoost"] = XGBClassifier(
-            use_label_encoder=False, eval_metric='mlogloss', random_state=RANDOM_STATE
-        )
 
-    # Espacios de búsqueda de hiperparámetros
     param_distributions = {
         "KNN": {"model__n_neighbors": [3, 5]},
         "SVM": {"model__C": [0.1, 1], "model__kernel": ['rbf']},
         "Logistic": {"model__C": [0.1, 1]},
         "RandomForest": {"model__n_estimators": [50, 100], "model__max_depth": [None, 10]},
     }
-    if USE_XGBOOST:
-        param_distributions["XGBoost"] = {
-            "model__max_depth": [3, 5],
-            "model__learning_rate": [0.05, 0.1]
-        }
 
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     results = []
@@ -178,34 +164,27 @@ def train_classification(df, feature_cols, quartile_col, preprocessor):
         rs.fit(X_train, y_train)
         y_pred = rs.predict(X_test)
 
-        # Métricas
         acc = accuracy_score(y_test, y_pred)
         bal_acc = balanced_accuracy_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred)
         cr = classification_report(y_test, y_pred)
 
-        # Mostrar métricas en consola
         print(f"Test Accuracy: {acc:.3f} | Balanced Accuracy: {bal_acc:.3f}")
         print("\nMatriz de confusión:")
         print(cm)
         print("\nReporte de clasificación:")
         print(cr)
 
-        # Guardar modelo entrenado con sus mejores hiperparámetros
         results.append((name, acc, bal_acc, rs.best_estimator_, rs.best_params_))
         dump(rs.best_estimator_, os.path.join(OUTPUT_DIR, f"{name}_classifier.joblib"))
 
-    # Guardar comparativa de modelos con hiperparámetros
-    df_results = pd.DataFrame(
-        results, 
-        columns=["Modelo", "Accuracy", "BalancedAcc", "BestEstimator", "BestParams"]
-    )
+    df_results = pd.DataFrame(results, columns=["Modelo", "Accuracy", "BalancedAcc", "BestEstimator", "BestParams"])
     df_results.to_csv(os.path.join(OUTPUT_DIR, "comparativa_clasificacion.csv"), index=False)
     return df_results
 
+
 @task
 def train_regression(df, feature_cols, preprocessor):
-    """Entrena y evalúa los modelos de regresión."""
     print("\nEntrenando modelos de regresión...")
 
     X = df[feature_cols]
@@ -219,15 +198,11 @@ def train_regression(df, feature_cols, preprocessor):
         "KNN": KNeighborsRegressor(),
         "SVR": SVR()
     }
-    if USE_XGBOOST:
-        regressors["XGBoost"] = XGBRegressor(random_state=RANDOM_STATE)
 
     param_distributions = {
         "KNN": {"model__n_neighbors": [3, 5]},
         "SVR": {"model__C": [0.1, 1]},
     }
-    if USE_XGBOOST:
-        param_distributions["XGBoost"] = {"model__max_depth": [3, 6], "model__learning_rate": [0.1]}
 
     cv = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     results = []
@@ -249,14 +224,13 @@ def train_regression(df, feature_cols, preprocessor):
     df_results.to_csv(os.path.join(OUTPUT_DIR, "comparativa_regresion.csv"), index=False)
     return df_results
 
+
 @task
 def best_model_report(df_results):
-    """Genera el reporte del mejor modelo de clasificación."""
     print("\nDeterminando mejor modelo de clasificación...")
     best_row = df_results.sort_values(by="BalancedAcc", ascending=False).iloc[0]
     best_model = best_row['Modelo']
     best_params = best_row['BestParams']
-    best_estimator = best_row['BestEstimator']
 
     print(f"\nMejor modelo: {best_model}")
     print(f"Accuracy: {best_row['Accuracy']:.3f}")
@@ -265,33 +239,121 @@ def best_model_report(df_results):
     for k, v in best_params.items():
         print(f"  - {k}: {v}")
 
-    # Guardar reporte completo en archivo
-    with open(os.path.join(OUTPUT_DIR, "mejor_modelo.txt"), "w") as f:
-        f.write(f"Mejor modelo: {best_model}\n")
-        f.write(f"Accuracy: {best_row['Accuracy']:.3f}\n")
-        f.write(f"Balanced Accuracy: {best_row['BalancedAcc']:.3f}\n\n")
-        f.write("Mejores hiperparámetros:\n")
-        for k, v in best_params.items():
-            f.write(f"  - {k}: {v}\n")
-
     return best_model
 
+
 # ============================================================
-# FLOW PRINCIPAL PREFECT
+# NUEVAS TAREAS DE IMPORTANCIA DE VARIABLES
+# ============================================================
+
+@task
+def analyze_feature_importance_rf_classification(df, feature_cols, quartile_col, preprocessor):
+    print("\n[Feature Importance] Random Forest (Clasificación) ...")
+    X = df[feature_cols]
+    y = df[quartile_col]
+
+    if y.min() > 0:
+        y = y - y.min()
+    if y.dtype == object:
+        le = LabelEncoder()
+        y = le.fit_transform(y)
+
+    pipe = ImbPipeline([
+        ("preproc", preprocessor),
+        ("smote", SMOTE(random_state=RANDOM_STATE)),
+        ("model", RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, n_jobs=N_JOBS))
+    ])
+    pipe.fit(X, y)
+
+    # >>> NEW (robust)
+    ct = pipe.named_steps["preproc"]
+    num_features = ct.transformers_[0][2] if ct.transformers_[0][2] is not None else []
+    cat_features = []
+    try:
+        ohe = ct.named_transformers_["cat"].named_steps["onehot"]
+        cat_input_cols = ct.transformers_[1][2] if len(ct.transformers_) > 1 else []
+        cat_features = list(ohe.get_feature_names_out(cat_input_cols))
+    except Exception as e:
+        print(f"[WARN] No se pudieron extraer nombres categóricos: {e}")
+    feature_names = np.array(list(num_features) + list(cat_features))
+    importances = pipe.named_steps["model"].feature_importances_
+    n_min = min(len(feature_names), len(importances))
+    feature_names = feature_names[:n_min]
+    importances = importances[:n_min]
+    imp_df = pd.DataFrame({"Feature": feature_names, "Importance": importances}).sort_values("Importance", ascending=False)
+    # <<< NEW
+
+    csv_path = os.path.join(OUTPUT_DIR, "rf_classifier_feature_importance.csv")
+    png_path = os.path.join(OUTPUT_DIR, "rf_classifier_feature_importance.png")
+    imp_df.to_csv(csv_path, index=False)
+    plt.figure(figsize=(10, 7))
+    plt.barh(imp_df.head(20)["Feature"][::-1], imp_df.head(20)["Importance"][::-1], color="steelblue")
+    plt.title("Importancia de variables - Random Forest (Clasificación)")
+    plt.xlabel("Importancia")
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[OK] Guardado: {csv_path} | {png_path}")
+
+
+@task
+def analyze_feature_importance_rf_regression(df, feature_cols, preprocessor):
+    print("\n[Feature Importance] Random Forest (Regresión) ...")
+    X = df[feature_cols]
+    y = df["total_score"]
+
+    pipe = Pipeline([
+        ("preproc", preprocessor),
+        ("model", RandomForestRegressor(n_estimators=300, random_state=RANDOM_STATE, n_jobs=N_JOBS))
+    ])
+    pipe.fit(X, y)
+
+    # >>> NEW (robust)
+    ct = pipe.named_steps["preproc"]
+    num_features = ct.transformers_[0][2] if ct.transformers_[0][2] is not None else []
+    cat_features = []
+    try:
+        ohe = ct.named_transformers_["cat"].named_steps["onehot"]
+        cat_input_cols = ct.transformers_[1][2] if len(ct.transformers_) > 1 else []
+        cat_features = list(ohe.get_feature_names_out(cat_input_cols))
+    except Exception as e:
+        print(f"[WARN] No se pudieron extraer nombres categóricos: {e}")
+    feature_names = np.array(list(num_features) + list(cat_features))
+    importances = pipe.named_steps["model"].feature_importances_
+    n_min = min(len(feature_names), len(importances))
+    feature_names = feature_names[:n_min]
+    importances = importances[:n_min]
+    imp_df = pd.DataFrame({"Feature": feature_names, "Importance": importances}).sort_values("Importance", ascending=False)
+    # <<< NEW
+
+    csv_path = os.path.join(OUTPUT_DIR, "rf_regressor_feature_importance.csv")
+    png_path = os.path.join(OUTPUT_DIR, "rf_regressor_feature_importance.png")
+    imp_df.to_csv(csv_path, index=False)
+    plt.figure(figsize=(10, 7))
+    plt.barh(imp_df.head(20)["Feature"][::-1], imp_df.head(20)["Importance"][::-1], color="darkorange")
+    plt.title("Importancia de variables - Random Forest (Regresión)")
+    plt.xlabel("Importancia")
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[OK] Guardado: {csv_path} | {png_path}")
+
+
+# ============================================================
+# FLOW PRINCIPAL
 # ============================================================
 
 @flow(name="academic_pipeline_prefect")
 def academic_pipeline():
-    """Flujo principal de entrenamiento completo con Prefect."""
     df = load_data(INPUT_PATH)
     df, feature_cols, quartile_col, preprocessor = preprocess_data(df)
     df_clf_results = train_classification(df, feature_cols, quartile_col, preprocessor)
     df_reg_results = train_regression(df, feature_cols, preprocessor)
     best_model_report(df_clf_results)
+    analyze_feature_importance_rf_classification(df, feature_cols, quartile_col, preprocessor)
+    analyze_feature_importance_rf_regression(df, feature_cols, preprocessor)
     print("\nPipeline completo finalizado correctamente.")
 
-# ============================================================
-# EJECUCIÓN DEL FLOW
-# ============================================================
+
 if __name__ == "__main__":
     academic_pipeline()
